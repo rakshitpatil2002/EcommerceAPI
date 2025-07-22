@@ -1,0 +1,227 @@
+package com.ecommerce;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.*;
+import org.springframework.stereotype.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.context.annotation.Bean;
+import javax.servlet.http.HttpServletRequest;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import javax.crypto.SecretKey;
+
+@SpringBootApplication
+@RestController
+public class ECommerceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(ECommerceApplication.class, args);
+    }
+
+    // ======== MODELS ========
+
+    static class Product {
+        public int id;
+        public String name;
+        public String category;
+        public double price;
+
+        public Product(int id, String name, String category, double price) {
+            this.id = id; this.name = name; this.category = category; this.price = price;
+        }
+    }
+
+    static class User {
+        public String username;
+        public String password;
+        public String role;
+
+        public User(String username, String password, String role) {
+            this.username = username; this.password = password; this.role = role;
+        }
+    }
+
+    static class CartItem {
+        public int productId;
+        public int quantity;
+
+        public CartItem(int productId, int quantity) {
+            this.productId = productId; this.quantity = quantity;
+        }
+    }
+
+    static class Order {
+        public int orderId;
+        public String username;
+        public List<CartItem> items;
+
+        public Order(int orderId, String username, List<CartItem> items) {
+            this.orderId = orderId; this.username = username; this.items = items;
+        }
+    }
+
+    // ========== DATA STORAGE ==========
+    List<Product> productList = new ArrayList<>();
+    List<User> users = new ArrayList<>();
+    Map<String, List<CartItem>> userCarts = new HashMap<>();
+    List<Order> orderList = new ArrayList<>();
+
+    SecretKey key = Keys.secretKeyFor(SignatureAlgorithm.HS256);
+
+    int productIdSeq = 1;
+    int orderIdSeq = 1;
+
+    @Bean
+    CommandLineRunner init() {
+        return args -> {
+            users.add(new User("admin", "admin", "ADMIN"));
+            users.add(new User("user", "user", "CUSTOMER"));
+            productList.add(new Product(productIdSeq++, "Laptop", "Electronics", 800));
+            productList.add(new Product(productIdSeq++, "Shirt", "Clothing", 20));
+        };
+    }
+
+    // ========== AUTH ==========
+
+    @PostMapping("/login")
+    public ResponseEntity<?> login(@RequestParam String username, @RequestParam String password) {
+        for (User u : users) {
+            if (u.username.equals(username) && u.password.equals(password)) {
+                String jws = Jwts.builder()
+                        .setSubject(u.username)
+                        .claim("role", u.role)
+                        .signWith(key)
+                        .compact();
+                return ResponseEntity.ok(Map.of("token", jws));
+            }
+        }
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+    }
+
+    public String getUsername(HttpServletRequest request) {
+        try {
+            String token = request.getHeader("Authorization").replace("Bearer ", "");
+            return Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token).getBody().getSubject();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public String getRole(HttpServletRequest request) {
+        try {
+            String token = request.getHeader("Authorization").replace("Bearer ", "");
+            return (String) Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token).getBody().get("role");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // ========== PRODUCTS ==========
+
+    @GetMapping("/products")
+    public List<Product> getProducts(@RequestParam(defaultValue = "") String search,
+                                     @RequestParam(defaultValue = "") String category,
+                                     @RequestParam(defaultValue = "0") int page,
+                                     @RequestParam(defaultValue = "10") int size) {
+        return productList.stream()
+                .filter(p -> p.name.toLowerCase().contains(search.toLowerCase()))
+                .filter(p -> category.isEmpty() || p.category.equalsIgnoreCase(category))
+                .skip(page * size).limit(size).collect(Collectors.toList());
+    }
+
+    @PostMapping("/products")
+    public ResponseEntity<?> addProduct(@RequestBody Product p, HttpServletRequest request) {
+        if (!"ADMIN".equals(getRole(request))) return ResponseEntity.status(403).body("Forbidden");
+        p.id = productIdSeq++;
+        productList.add(p);
+        return ResponseEntity.ok(p);
+    }
+
+    @PutMapping("/products/{id}")
+    public ResponseEntity<?> updateProduct(@PathVariable int id, @RequestBody Product p, HttpServletRequest request) {
+        if (!"ADMIN".equals(getRole(request))) return ResponseEntity.status(403).body("Forbidden");
+        for (Product prod : productList) {
+            if (prod.id == id) {
+                prod.name = p.name;
+                prod.category = p.category;
+                prod.price = p.price;
+                return ResponseEntity.ok(prod);
+            }
+        }
+        return ResponseEntity.status(404).body("Product not found");
+    }
+
+    @DeleteMapping("/products/{id}")
+    public ResponseEntity<?> deleteProduct(@PathVariable int id, HttpServletRequest request) {
+        if (!"ADMIN".equals(getRole(request))) return ResponseEntity.status(403).body("Forbidden");
+        productList.removeIf(p -> p.id == id);
+        return ResponseEntity.ok("Deleted");
+    }
+
+    // ========== CART ==========
+
+    @PostMapping("/cart")
+    public ResponseEntity<?> addToCart(@RequestBody CartItem item, HttpServletRequest request) {
+        String user = getUsername(request);
+        if (user == null) return ResponseEntity.status(401).body("Unauthorized");
+        userCarts.putIfAbsent(user, new ArrayList<>());
+        userCarts.get(user).add(item);
+        return ResponseEntity.ok("Item added to cart");
+    }
+
+    @GetMapping("/cart")
+    public ResponseEntity<?> getCart(HttpServletRequest request) {
+        String user = getUsername(request);
+        return ResponseEntity.ok(userCarts.getOrDefault(user, new ArrayList<>()));
+    }
+
+    @DeleteMapping("/cart")
+    public ResponseEntity<?> clearCart(HttpServletRequest request) {
+        String user = getUsername(request);
+        userCarts.remove(user);
+        return ResponseEntity.ok("Cart cleared");
+    }
+
+    // ========== ORDER ==========
+
+    @PostMapping("/order")
+    public ResponseEntity<?> placeOrder(HttpServletRequest request) {
+        String user = getUsername(request);
+        List<CartItem> cart = userCarts.getOrDefault(user, new ArrayList<>());
+        if (cart.isEmpty()) return ResponseEntity.badRequest().body("Cart is empty");
+        Order o = new Order(orderIdSeq++, user, new ArrayList<>(cart));
+        orderList.add(o);
+        userCarts.remove(user);
+        return ResponseEntity.ok(o);
+    }
+
+    @GetMapping("/orders")
+    public List<Order> getOrders(HttpServletRequest request) {
+        String user = getUsername(request);
+        return orderList.stream().filter(o -> o.username.equals(user)).collect(Collectors.toList());
+    }
+
+    // ========== HTML FRONTEND ==========
+
+    @GetMapping("/")
+    public String home() {
+        return """
+        <html><body>
+        <h2>Simple E-Commerce Frontend</h2>
+        <form action='/login' method='post'>
+            Username: <input name='username'/><br/>
+            Password: <input name='password'/><br/>
+            <button type='submit'>Login</button>
+        </form>
+        <br/>
+        <p>Use Postman or a frontend to interact with /products, /cart, /order APIs</p>
+        </body></html>
+        """;
+    }
+}
