@@ -1,2 +1,0 @@
-# EcommerceAPI
-Project Code
